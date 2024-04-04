@@ -1,0 +1,365 @@
+---
+title: "Applying gtex to GMEA Testo_results"
+date: "2024-4-4"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    fig_width: 13
+    fig_height: 12
+  pdf_document:
+    toc: yes
+theme: cosmo
+---
+# Introduction
+
+This is a report on the analysis of enrichment pathways for TESTO study. We analyzed the DMPs results for TESTO study and used the Mitch package to identify pathways specific to TESTO study. 
+As an additional quality control step, we used genes specific to skeletal_muscle tissue from GTEx website as a filter to improve the relevance of our findings to skeletal_muscle tissue.
+
+## Load packages.
+
+```{r,packages}
+
+suppressPackageStartupMessages({
+  library("limma")
+  library("eulerr")
+  library("IlluminaHumanMethylation450kmanifest")
+  library("IlluminaHumanMethylationEPICanno.ilm10b4.hg19")
+  library("HGNChelper")
+  library("tictoc")
+  library("mitch")
+  library("kableExtra")
+  library("beeswarm")
+  library("missMethyl")
+  library("gridExtra")
+  library("png")
+  library("metafor")
+  library("ggplot2")
+  library("purrr")
+library("metafor")
+library("dplyr")
+library("readxl")
+library("ggplot2")
+library("tidyverse")
+library("magrittr")
+library("readr")
+library("eulerr")
+library("RColorBrewer")
+library("e1071")
+})
+
+CORES=8
+
+```
+
+# Load data
+
+Reactome pathways were downloaded on the 11th January 2024.
+
+```{r,load1}
+
+if(!file.exists("ReactomePathways.gmt")) {
+  download.file("https://reactome.org/download/current/ReactomePathways.gmt.zip",
+    destfile="ReactomePathways.gmt.zip")
+  unzip("ReactomePathways.gmt.zip")
+}
+
+gs <- gmt_import("ReactomePathways.gmt")
+head(gs)
+
+```
+
+# Curate the annotation
+
+Using all probes on the EPIC chip.
+
+Therefore, gene names will be updated using the HGNC package since most of them have been updated over time.
+
+```{r,anno1}
+
+tic()
+anno <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+myann <- data.frame(anno[,c("UCSC_RefGene_Name","UCSC_RefGene_Group","Islands_Name","Relation_to_Island")])
+gp <- myann[,"UCSC_RefGene_Name",drop=FALSE]
+gp2 <- strsplit(gp$UCSC_RefGene_Name,";")
+names(gp2) <- rownames(gp)
+gp2 <- lapply(gp2,unique)
+gt <- stack(gp2)
+colnames(gt) <- c("gene","probe")
+gt$probe <- as.character(gt$probe)
+dim(gt)
+str(gt)
+toc() 
+
+
+tic()
+#new.hgnc.table <- getCurrentHumanMap() Dec 2023
+if(!file.exists("new.hgnc.table.rds")) {
+  download.file("https://github.com/markziemann/gmea/raw/main/figs/new.hgnc.table.rds",
+    destfile="new.hgnc.table.rds")
+}
+new.hgnc.table <- readRDS("new.hgnc.table.rds")
+fix <- checkGeneSymbols(gt$gene,map=new.hgnc.table)
+fix2 <- fix[which(fix$x != fix$Suggested.Symbol),]
+length(unique(fix2$x))
+gt$gene <- fix$Suggested.Symbol
+toc()
+
+```
+
+# Load meta-regression data
+
+Loading of the DMP result of the TESTO study.
+t-statistic of the EWAS model will be choose.
+
+According to the histogram,the t-statistic values are centered around zero. This IMPLIES that most of the t-statistic are clustering around the mean. Therefore it can be conclude that TESTO study results capture the real effect of the relationship of DNAm~exercise status+ potential confounders in the current dataset.
+
+```{r,load_data}
+
+sarah<-read_delim("/home/mandhri/850K_Sarah.tbl")
+sarah <- as.data.frame(sarah)
+sarah <- sarah[, c(1,4)]
+rownames(sarah) <- sarah$CPG
+sarah <- sarah %>% dplyr::select(-CPG)
+hist(sarah$TESTSTAT,main = "Distribution of t-statistic in the testo results", xlab = "T-statistics")
+
+```
+
+
+
+## Mitch import
+
+Mitch_import will be used to measure the differential gene methylation expression scores for the genes obtained from the Testo study for the relationship of interest.  
+
+```{r,mg1_muscle}
+
+tic()
+m_buc<- mitch_import(x=sarah,DEtype="prescored",geneTable=gt)
+toc()
+
+hist(m_buc$x,main = "distribution of differential gene methylation scores-testo")
+dim(m_buc)
+
+head(m_buc) %>%
+  kbl(caption = "Example of differential gene methylation scores used for pathway analysis") %>%
+  kable_paper("hover", full_width = F)
+```
+
+
+# Filtering the gene expression with the gtex file that is specific to Testo study 
+
+In here, we will be downloading the GTEx muscle tissue specific gene expression profiles. There is only 1 type GTEx gene expression counts profile for muscle tissue. m_buc is the gene expression counts for muscle tissue gene expression counts.
+
+The histograms represent the row means of the downloaded GTEx gene counts for the m_buc variables in log 10.
+
+## Download Counts
+
+Gene counts specific to skeletal_muscle tissue is downloaded.
+
+```{r,GTEx_Download}
+
+if (! file.exists("gene_reads_2017-06-05_v8_muscle_skeletal.gct.gz") ) {
+  download.file("https://storage.googleapis.com/adult-gtex/bulk-gex/v8/rna-seq/counts-by-tissue/gene_reads_2017-06-05_v8_muscle_skeletal.gct.gz",
+    destfile="gene_reads_2017-06-05_v8_muscle_skeletal.gct.gz")
+}
+
+
+buc_tisue <- read.table("gene_reads_2017-06-05_v8_muscle_skeletal.gct.gz", header = TRUE, sep = "\t", skip = 2)
+head(buc_tisue) %>%
+  kbl(caption = "Head of the skeletal_muscle_tissue") %>%
+  kable_paper("hover", full_width = F)
+
+rownames(buc_tisue) <- paste(buc_tisue$Name,buc_tisue$Description)
+
+buc_tisue[,1:3]=NULL
+
+hist(log10(rowMeans(buc_tisue)))
+
+head(buc_tisue) %>%
+  kbl(caption = "Head of the skeletal_muscle_tissue_after_adjusting rownames") %>%
+  kable_paper("hover", full_width = F)
+
+
+```
+
+## Downloading GTEx RNA-Seq FPKM (Fragments Per Kilobase of transcript per Million mapped reads)gene expression data
+
+we will be downloading the adult GTEx RNA-Seq FPKM data. The purpose of the download is to match the adult GTEx RNA-Seq genes with the skeletal_muscle_tissue gene counts.
+
+```{r,FPKM}
+
+options(timeout = max(600, getOption("timeout")))
+
+if (! file.exists("GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz") ) {
+  download.file("https://storage.googleapis.com/adult-gtex/bulk-gex/v6/rna-seq/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz",
+    destfile="/mnt/vol1/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz")
+}
+
+fpkm <- read.table("/mnt/vol1/GTEx_Analysis_v6_RNA-seq_RNA-SeQCv1.1.8_gene_rpkm.gct.gz",header=TRUE,skip=2)
+
+rownames(fpkm) <- paste(fpkm$Name,fpkm$Description)
+fpkm[,1:2]=NULL
+head(fpkm) %>%
+  kbl(caption = "Head of GTEx RNA-Seq FPKM after removing first 2 columns") %>%
+  kable_paper("hover", full_width = F)
+
+fpkm <- fpkm[,which(colnames(fpkm) %in% colnames(buc_tisue))]
+
+hist(log10(rowMeans(fpkm)))
+
+length(which(rowMeans(fpkm)>1))
+
+fpkm2 <- fpkm[which(rowMeans(fpkm)>1),]
+
+head(fpkm2) %>%
+  kbl(caption = "Head of GTEx RNA-Seq FPKM after filtering with GTEx skeletal_muscle gene expression counts of mean>1 ") %>%
+  kable_paper("hover", full_width = F)
+hist(log10(rowMeans(fpkm2)))
+write.table(fpkm2,file="/home/mandhri/sarah_fpkm_filtered_mean.tsv")
+```
+
+## Filtering the genes of DMPs with the updated skeletal_muscle gene specific genes.
+
+After filtering the adult GTEx RNA-Seq genes with the skeletal_muscle gene counts, we will use the resulted gene list to filter the DMPs genes that we obtained from the analysis. The purpose of this filtration is to fine-tune the gene list specific to the skeletal_muscle tissue and thereby the enrichment pathways result in the analysis will be much more skeletal_muscle specific.
+
+Number of genes in the Testo study= 21857
+Number of genes after filtering for tissue specificity= 887
+
+```{r, filtering the genes of DMPs}
+
+fpkm2$symbol<-gsub(".*\\s", "", rownames(fpkm2))
+head(fpkm2$symbol)
+symbol_freq <- table(fpkm2$symbol)
+
+m_buc$gene <- as.character(row.names(m_buc))
+m_buc <- m_buc[m_buc$gene %in% fpkm2$symbol, ]
+m_buc <- subset(m_buc, select = -gene)
+
+
+```
+
+## Calculating genes in the Reactome pathways
+
+In here, we are calculating the unique number of genes present in the reactome pathway and then we will filter how many Testo Study genes present in the list of unique reactome genes. 
+
+Result:
+Total number of genes in the Reactome pathway= 11,613
+Total number of genes present in the Testo Study = 887
+Total number of unique genes present in the Testo Study = 541
+Total number of GTEx filtered and Testo Study gene pathways in the Reactome pathway= 123
+Total number of GTEx filtered and Testo Study gene pathways NOT INCLUDED in the Reactome pathway= 2558
+
+
+```{r,calculating genes in the Reactome pathways-muscle}
+
+genenames <- unique(unname(unlist(gs)))
+length(which(rownames(m_buc) %in% genenames))
+length(which(!rownames(m_buc) %in% genenames))
+```
+
+## Calculating the gene set pathways enrichment for the differential gene methylation expressions
+
+In here, I will be calculating gene set pathways for the updated meta regressed gene set. I will be using two parameters such as "effect" and "significance". mres1_buc is the variable for the effect and mres2_buc is the variable for significance. 
+
+```{r, calculating the gene set pathways enrichment for the differential gene methylation expressions_buccal}
+tic()
+mres1_buc <- mitch_calc(x=m_buc,genesets=gs,minsetsize=5,cores=16, priority="effect")
+
+mres2_buc<- mitch_calc(x=m_buc,genesets=gs,minsetsize=5,cores=16, priority="significance")
+
+str(mres1_buc$analysis_metrics)
+str(mres2_buc$analysis_metrics)
+toc()
+```
+
+## Up and down regulated pathways of Testo study
+
+In here, I will be finding the up and down regulated pathways of TESTO study
+
+
+```{r, Graphical representation of the differential methylated pathways-TESTO_study}
+
+mtable1_buc <- mres1_buc$enrichment_result
+mtable1_buc[1:20,] %>%
+  kbl(caption = "Head of the DMPs for priority effect") %>%
+  kable_paper("hover", full_width = F)
+
+mtable2_buc <- mres2_buc$enrichment_result
+mtable2_buc[1:20,] %>%
+  kbl(caption = "Head of the Dmps for priority effect") %>%
+  kable_paper("hover", full_width = F)
+
+
+up1_buc <- subset(mtable1_buc,pANOVA<0.05 & setSize >= 5 & s.dist > 0.3)
+up2_buc <- subset(mtable2_buc,pANOVA< 0.05 & setSize >= 5 & s.dist > 0.3)
+
+dwn1_buc <- subset(mtable1_buc,pANOVA<0.05 & setSize>=5 & s.dist < -0.3)
+dwn2_buc <- subset(mtable2_buc,pANOVA < 0.05 & setSize >= 5 & s.dist < -0.3)
+
+up_buc<-rbind(up1_buc,up2_buc)
+dw_buc<-rbind(dwn1_buc,dwn2_buc)
+
+top_buc <- rbind(up_buc,dw_buc)
+top_buc <- top_buc[order(top_buc$s.dist),]
+```
+
+# Finding duplicates
+
+In here, I will be removing the duplicated pathways. 
+
+
+```{r, dupl}
+head(top_buc)
+
+duplicates <- top_buc[duplicated(top_buc$set), ]
+duplicate_sets <- top_buc[duplicated(top_buc$set) | duplicated(top_buc$set, fromLast = TRUE), ]
+
+which(duplicate_sets$set == "FCERI mediated NF-kB activation")
+duplicate_sets[c(89,891),]
+
+top_buc <- top_buc %>%
+  group_by(set) %>%
+  distinct(setSize, pANOVA, s.dist, p.adjustANOVA, .keep_all = TRUE) %>%
+  ungroup()
+
+```
+
+# Graphical representation of the differential methylated pathways-TESTO study
+
+The top 20 enriched pathways will be displayed, sorted in ascending order by the pANOVA values
+
+
+```{r,fig.width=8, fig.height=6, message=FALSE, warning=FALSE, echo=TRUE}
+
+top_buc_p <- top_buc %>%
+  arrange(pANOVA) %>%
+  slice_head(n = 20)
+
+barnames <- gsub("_"," ",gsub("REACTOME_","",top_buc_p$set))
+cols_buc <- ifelse(sign(top_buc_p$s.dist) > 0, "red", "blue")
+# margins (bottom, left, top, right)
+
+par(mar = c(4.1, 21.1, 2.1, 1))
+barplot(abs(top_buc_p$s.dist), space = 0.6, horiz=TRUE, las=1, names.arg=barnames, 
+        cex.names=0.85, cex.axis=0.8, col=cols_buc, xlab="Enrichment score", 
+        cex.lab = 0.7, xlim=c(0, 0.8))
+
+axis(side=1,las=1, cex.axis=0.7)
+
+title(main = "Pathway Analysis Enrichment Scores TESTO study", line = 1, adj = 1) 
+legend("topright", inset = c(0.01, 0.43), legend = c("up ↑", "down ↓"), 
+       fill = c("red", "blue"), cex = 0.7)
+grid()
+
+```
+
+```{r, session_info}
+sessionInfo()
+```
+
+
+
+
+
+
